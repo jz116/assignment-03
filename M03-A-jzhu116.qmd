@@ -1,0 +1,1165 @@
+---
+title: "Module 3 Assignment: Big Data Visualization on Scale"
+author:
+  - name: Jiecheng Zhu
+    affiliations:
+      - id: bu
+        name: Boston University
+        city: Boston
+        state: MA
+number-sections: true
+date: today
+format:
+  html:
+    theme: cerulean
+    toc: true
+    toc-depth: 2
+  docx:
+    toc: true
+    toc-depth: 2
+date-modified: today
+date-format: long
+jupyter: python3
+execute:
+  echo: true
+  eval: true
+  freeze: auto
+  warning: false
+---
+
+
+
+# Submission Validation and Setup
+
+This assignment uses a private API key to create one Excel workbook for your responses. The first run creates a dated workbook in `research_submissions/`. Later runs reuse that same workbook, so you can safely rerun this document without overwriting your work.
+
+- Update the `.env.example` file in this folder with your Employability API key and rename it to `.env`.
+- Update the `EMPLOYABILITY_API_KEY` value with your Employability API key from the previous step. 
+- Run the following code chunk to verify that your API key is working.
+- Do not run the code chunk below this one until you have updated your API key.
+
+```text
+EMPLOYABILITY_API_KEY=replace_with_your_student_api_key
+EMPLOYABILITY_API_BASE_URL=https://met-employability-services.azurewebsites.net
+EMPLOYABILITY_API_PATH_PREFIX=/met-career-match
+RESEARCH_ASSIGNMENT_CODE=M03_A_emplo
+```
+
+Do not commit `.env`, API keys, screenshots of keys, or generated response files unless your instructor explicitly asks for them.
+
+```{python}
+#| label: load-system-code
+#| include: false
+#| eval: true
+
+from pathlib import Path
+import sys
+
+if not Path("_system_code").exists() and Path("analytics/_system_code").exists():
+    sys.path.insert(0, str(Path("analytics").resolve()))
+
+from _system_code.research_survey import prepare_workbook, print_runtime_summary, validate_workbook
+```
+
+## System Check
+
+```{python}
+#| label: system-check
+#| eval: true
+#| echo: false
+print_runtime_summary()
+```
+
+## Create or Reuse Your Excel Workbook
+
+```{python}
+#| eval: true
+#| echo: false
+#| label: create-workbook
+workbook_path = prepare_workbook();
+```
+
+Open the generated workbook inside `research_submissions/` folder, complete the `Survey`, `Assignment`, and `AI Chat` sheets, then save the file.
+
+## Validate Your Filled Workbook
+
+**Turn** `eval: true`after you are done with the assignment. 
+
+```{python}
+#| eval: false
+#| echo: false
+#| label: validate-workbook
+validate_workbook()
+```
+
+This validation step checks the Excel workbook locally and creates a local validation report. 
+
+# Assignment Responses
+
+**GitHub repository:** `REPLACE_WITH_YOUR_HTTPS_GITHUB_REPOSITORY_URL`
+
+All large-scale filtering, cleaning, and aggregation is performed with Spark. Only the columns needed for a visualization, or already-aggregated results, are converted to pandas for Plotly.
+
+## Shared Analysis Setup
+
+```{python}
+#| label: analysis-setup
+
+from pathlib import Path
+import re
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import plotly.io as pio
+from IPython.display import Image, Markdown, display
+from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+
+np.random.seed(42)
+
+OUTPUT_DIR = Path("output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+pio.templates["ad688"] = go.layout.Template(
+    layout=go.Layout(
+        font={
+            "family": "Arial, Helvetica, sans-serif",
+            "size": 14,
+            "color": "#243447",
+        },
+        title={
+            "font": {
+                "family": "Arial, Helvetica, sans-serif",
+                "size": 24,
+                "color": "#0B3B6E",
+            },
+            "x": 0.5,
+            "xanchor": "center",
+        },
+        colorway=[
+            "#0B5FA5",
+            "#2A9D8F",
+            "#E67E22",
+            "#6C5CE7",
+            "#D1495B",
+            "#7A8B99",
+        ],
+        paper_bgcolor="#FFFFFF",
+        plot_bgcolor="#F7F9FC",
+        hovermode="closest",
+        legend={
+            "bgcolor": "rgba(255,255,255,0.88)",
+            "bordercolor": "#D9E2EC",
+            "borderwidth": 1,
+        },
+        xaxis={
+            "showgrid": False,
+            "linecolor": "#AAB7C4",
+            "title_font": {"size": 15},
+        },
+        yaxis={
+            "showgrid": True,
+            "gridcolor": "#D9E2EC",
+            "zeroline": False,
+            "title_font": {"size": 15},
+        },
+        margin={"l": 80, "r": 40, "t": 90, "b": 80},
+    )
+)
+
+pio.templates.default = "ad688"
+pio.renderers.default = "notebook"
+
+
+def export_and_display_figure(fig, name, width=1200, height=700, scale=1):
+    """Export an interactive copy and display a static image for HTML/DOCX."""
+    html_path = OUTPUT_DIR / f"{name}.html"
+    png_path = OUTPUT_DIR / f"{name}.png"
+
+    fig.write_html(
+        str(html_path),
+        full_html=True,
+        include_plotlyjs="cdn",
+    )
+
+    try:
+        fig.write_image(
+            str(png_path),
+            width=width,
+            height=height,
+            scale=scale,
+        )
+        display(Image(filename=str(png_path)))
+    except Exception as exc:
+        print(f"Static export failed for {name}: {exc}")
+        print("Displaying the interactive Plotly figure instead.")
+        fig.show()
+
+
+def display_two_sentence_insight(sentence_one, sentence_two):
+    display(Markdown(f"**Key insights.** {sentence_one} {sentence_two}"))
+
+
+def safe_file_name(value):
+    cleaned = re.sub(r"[^a-z0-9]+", "_", value.lower())
+    return cleaned.strip("_")
+```
+
+# 1. Load and Clean the Dataset
+
+## 1.1 Load the Raw Dataset
+
+The code below locates all Parquet partitions, verifies that the expected 17 files are available, and loads them into a distributed Spark DataFrame.
+
+```{python}
+#| label: load-dataset
+
+spark = (
+    SparkSession.builder
+    .appName("AD688-Assignment03")
+    .config("spark.sql.shuffle.partitions", "16")
+    .getOrCreate()
+)
+
+data_candidates = [
+    Path("../data/MET_CareerCompass_2026"),
+    Path("data/MET_CareerCompass_2026"),
+    Path("MET_CareerCompass_2026"),
+]
+
+dataset_dir = None
+for candidate in data_candidates:
+    if candidate.exists() and any(candidate.glob("*.parquet")):
+        dataset_dir = candidate
+        break
+
+if dataset_dir is None:
+    raise FileNotFoundError(
+        "MET_CareerCompass_2026 was not found. Expected it in ../data, "
+        "data/, or the repository root."
+    )
+
+parquet_files = sorted(dataset_dir.glob("*.parquet"))
+
+if len(parquet_files) != 17:
+    raise ValueError(
+        f"Expected 17 Parquet files, but found {len(parquet_files)} "
+        f"in {dataset_dir.resolve()}."
+    )
+
+parquet_paths = [str(path.resolve()) for path in parquet_files]
+df = spark.read.parquet(*parquet_paths)
+df.createOrReplaceTempView("job_postings")
+
+print(f"Dataset directory: {dataset_dir.resolve()}")
+print(f"Parquet partitions loaded: {len(parquet_files)}")
+print(f"Columns available: {len(df.columns)}")
+```
+
+The dataset loads from 17 Parquet partitions and exposes the full MET job-posting schema for distributed analysis. Keeping the raw data in Spark avoids collecting the full dataset into EC2 driver memory.
+
+## 1.2 Cast Salary and Experience Columns
+
+```{python}
+#| label: cast-numeric-columns
+
+numeric_columns = [
+    "SALARY_FROM",
+    "SALARY_TO",
+    "SALARY",
+    "MIN_YEARS_EXPERIENCE",
+    "MAX_YEARS_EXPERIENCE",
+]
+
+clean_df = df
+
+for column_name in numeric_columns:
+    numeric_expression = (
+        f"try_cast(regexp_replace(trim(`{column_name}`), '[,$]', '') as double)"
+    )
+    clean_df = clean_df.withColumn(
+        column_name,
+        F.expr(numeric_expression),
+    )
+```
+
+The salary and experience fields are converted from strings to numeric values so they can be summarized and visualized correctly. `try_cast` safely converts malformed or structured salary strings to missing values instead of stopping the Spark job.
+
+## 1.3 Compute Medians and Impute Missing Salaries
+
+```{python}
+#| label: salary-medians-imputation
+
+median_row = clean_df.agg(
+    F.percentile_approx("SALARY_FROM", 0.5).alias("median_from"),
+    F.percentile_approx("SALARY_TO", 0.5).alias("median_to"),
+    F.percentile_approx("SALARY", 0.5).alias("median_salary"),
+).first()
+
+median_from = median_row["median_from"]
+median_to = median_row["median_to"]
+median_salary = median_row["median_salary"]
+
+print("Medians:", median_from, median_to, median_salary)
+
+if median_from is None or median_to is None:
+    raise ValueError("Salary-bound medians could not be calculated.")
+
+clean_df = (
+    clean_df
+    .withColumn(
+        "SALARY_FROM",
+        F.when(
+            F.col("SALARY_FROM").isNull() | (F.col("SALARY_FROM") <= 0),
+            F.lit(float(median_from)),
+        ).otherwise(F.col("SALARY_FROM")),
+    )
+    .withColumn(
+        "SALARY_TO",
+        F.when(
+            F.col("SALARY_TO").isNull() | (F.col("SALARY_TO") <= 0),
+            F.lit(float(median_to)),
+        ).otherwise(F.col("SALARY_TO")),
+    )
+    .withColumn(
+        "Average_Salary",
+        (F.col("SALARY_FROM") + F.col("SALARY_TO")) / 2.0,
+    )
+    .withColumn(
+        "SALARY",
+        F.coalesce(F.col("SALARY"), F.col("Average_Salary")),
+    )
+)
+
+salary_preview = (
+    clean_df
+    .select(
+        "Average_Salary",
+        "SALARY",
+        "EDUCATION_LEVELS_NAME",
+        "REMOTE_TYPE_NAME",
+        "MAX_YEARS_EXPERIENCE",
+        "ONET_NAME",
+    )
+    .limit(5)
+    .toPandas()
+)
+
+salary_preview_display = salary_preview.copy()
+salary_preview_display["Average_Salary"] = [
+    f"${value:,.2f}" for value in salary_preview_display["Average_Salary"]
+]
+salary_preview_display["SALARY"] = [
+    f"${value:,.2f}" for value in salary_preview_display["SALARY"]
+]
+display(Markdown(salary_preview_display.to_markdown(index=False)))
+```
+
+The median advertised salary bounds are used to replace missing or zero lower and upper salary values before calculating a row-level average salary. This approach retains incomplete postings for analysis, although imputed observations should be interpreted cautiously because they reduce some of the natural salary variation.
+
+## 1.4 Clean the Education Column
+
+```{python}
+#| label: clean-education
+
+clean_df = clean_df.withColumn(
+    "EDUCATION_LEVELS_NAME",
+    F.trim(
+        F.regexp_replace(
+            F.regexp_replace(
+                F.col("EDUCATION_LEVELS_NAME"),
+                r"[\r\n]+",
+                " ",
+            ),
+            r"\\[nr]",
+            " ",
+        )
+    ),
+)
+
+education_preview = (
+    clean_df
+    .select(
+        "Average_Salary",
+        "SALARY",
+        "EDUCATION_LEVELS_NAME",
+        "REMOTE_TYPE_NAME",
+        "MAX_YEARS_EXPERIENCE",
+        "ONET_NAME",
+    )
+    .limit(5)
+    .toPandas()
+)
+
+education_preview_display = education_preview.copy()
+education_preview_display["Average_Salary"] = [
+    f"${value:,.2f}" for value in education_preview_display["Average_Salary"]
+]
+education_preview_display["SALARY"] = [
+    f"${value:,.2f}" for value in education_preview_display["SALARY"]
+]
+display(Markdown(education_preview_display.to_markdown(index=False)))
+```
+
+Removing newline and carriage-return characters standardizes education labels and prevents visually identical categories from being separated during grouping. The list-like structure is retained because a posting can identify more than one acceptable education level.
+
+## 1.5 Export the Cleaned Data
+
+```{python}
+#| label: export-cleaned-data
+
+cleaned_output_path = Path("../data/MET_CareerCompass_2026_cleaned")
+rows_retained = clean_df.count()
+
+(
+    clean_df.write
+    .mode("overwrite")
+    .parquet(str(cleaned_output_path.resolve()))
+)
+
+print(f"Data cleaning complete. Rows retained: {rows_retained}")
+print(f"Cleaned data exported to: {cleaned_output_path.resolve()}")
+```
+
+The cleaning workflow retains the available job postings while standardizing the salary, experience, and education fields required in later sections. Saving the result as Parquet provides an efficient reusable dataset without adding the large files to Git.
+
+# 2. Salary Distribution by Industry and Employment Type
+
+```{python}
+#| label: salary-industry-employment-boxplot
+
+salary_industry_df = (
+    clean_df
+    .filter(
+        F.col("SALARY_FROM").isNotNull()
+        & (F.col("SALARY_FROM") > 0)
+        & F.col("NAICS2_NAME").isNotNull()
+        & (F.trim(F.col("NAICS2_NAME")) != "")
+    )
+    .withColumn(
+        "EMPLOYMENT_TYPE_NAME",
+        F.when(
+            F.col("EMPLOYMENT_TYPE_NAME").isNull()
+            | (F.trim(F.col("EMPLOYMENT_TYPE_NAME")) == ""),
+            F.lit("Unknown"),
+        ).otherwise(F.trim(F.col("EMPLOYMENT_TYPE_NAME"))),
+    )
+)
+
+salary_distribution_summary = (
+    salary_industry_df
+    .groupBy("NAICS2_NAME", "EMPLOYMENT_TYPE_NAME")
+    .agg(
+        F.count("*").alias("Job_Postings"),
+        F.percentile_approx("SALARY_FROM", 0.25).alias("Q1_Salary"),
+        F.percentile_approx("SALARY_FROM", 0.50).alias("Median_Salary"),
+        F.percentile_approx("SALARY_FROM", 0.75).alias("Q3_Salary"),
+    )
+)
+
+industry_order_rows = (
+    salary_industry_df
+    .groupBy("NAICS2_NAME")
+    .agg(
+        F.percentile_approx("SALARY_FROM", 0.50).alias("Industry_Median")
+    )
+    .orderBy(F.desc("Industry_Median"))
+    .collect()
+)
+
+industry_order = [row["NAICS2_NAME"] for row in industry_order_rows]
+
+salary_industry_pdf = (
+    salary_industry_df
+    .select(
+        "NAICS2_NAME",
+        "SALARY_FROM",
+        "EMPLOYMENT_TYPE_NAME",
+    )
+    .toPandas()
+)
+
+salary_minimum = salary_industry_pdf["SALARY_FROM"].min()
+salary_maximum = salary_industry_pdf["SALARY_FROM"].max()
+use_industry_log_scale = (
+    salary_minimum > 0
+    and salary_maximum / salary_minimum > 100
+)
+
+industry_box = px.box(
+    salary_industry_pdf,
+    x="NAICS2_NAME",
+    y="SALARY_FROM",
+    color="EMPLOYMENT_TYPE_NAME",
+    category_orders={"NAICS2_NAME": industry_order},
+    points="outliers",
+    log_y=use_industry_log_scale,
+    title="Starting Salary Distribution by Industry and Employment Type",
+    labels={
+        "NAICS2_NAME": "NAICS Industry",
+        "SALARY_FROM": "Starting Salary",
+        "EMPLOYMENT_TYPE_NAME": "Employment Type",
+    },
+)
+
+industry_box.update_layout(
+    template="ad688",
+    height=850,
+    boxmode="group",
+    legend={
+        "orientation": "h",
+        "y": 1.12,
+        "x": 0.5,
+        "xanchor": "center",
+        "title": {"text": "Employment Type"},
+    },
+    margin={"l": 90, "r": 40, "t": 140, "b": 280},
+)
+
+industry_box.update_xaxes(tickangle=-40, showgrid=False)
+industry_box.update_yaxes(
+    title_text=(
+        "Starting Salary (USD, logarithmic scale)"
+        if use_industry_log_scale
+        else "Starting Salary (USD)"
+    ),
+    tickprefix="$",
+    tickformat=",.0f",
+)
+industry_box.update_traces(
+    marker={"size": 5, "opacity": 0.60},
+    line={"width": 1.3},
+)
+
+export_and_display_figure(
+    industry_box,
+    "salary_distribution_by_industry_employment_type",
+    width=1500,
+    height=950,
+)
+
+top_industry_row = industry_order_rows[0]
+top_employment_row = (
+    salary_industry_df
+    .groupBy("EMPLOYMENT_TYPE_NAME")
+    .agg(F.percentile_approx("SALARY_FROM", 0.50).alias("Median_Salary"))
+    .orderBy(F.desc("Median_Salary"))
+    .first()
+)
+
+display_two_sentence_insight(
+    (
+        f"{top_industry_row['NAICS2_NAME']} has the highest median starting "
+        f"salary at approximately ${top_industry_row['Industry_Median']:,.0f}."
+    ),
+    (
+        f"Among employment types, {top_employment_row['EMPLOYMENT_TYPE_NAME']} "
+        f"has the highest median starting salary at approximately "
+        f"${top_employment_row['Median_Salary']:,.0f}; the "
+        f"{'logarithmic' if use_industry_log_scale else 'linear'} scale keeps "
+        "the cross-industry comparison readable."
+    ),
+)
+```
+
+# 3. Salary Analysis by ONET Occupation Type
+
+```{python}
+#| label: onet-salary-bubble-chart
+
+onet_salary_df = (
+    clean_df
+    .filter(
+        F.col("ONET_NAME").isNotNull()
+        & (F.trim(F.col("ONET_NAME")) != "")
+        & F.col("SALARY").isNotNull()
+        & (F.col("SALARY") > 0)
+    )
+    .groupBy("ONET_NAME")
+    .agg(
+        F.percentile_approx("SALARY", 0.50).alias("Median_Salary"),
+        F.count("*").alias("Job_Postings"),
+    )
+    .withColumnRenamed("ONET_NAME", "Occupation_Name")
+    .orderBy(F.desc("Job_Postings"), F.asc("Occupation_Name"))
+    .limit(10)
+)
+
+onet_salary_pdf = onet_salary_df.toPandas()
+
+if onet_salary_pdf.empty:
+    raise ValueError("No usable ONET salary records were available.")
+
+onet_bubble = px.scatter(
+    onet_salary_pdf,
+    x="Occupation_Name",
+    y="Median_Salary",
+    size="Job_Postings",
+    color="Job_Postings",
+    size_max=72,
+    color_continuous_scale=[
+        [0.00, "#DCEAF7"],
+        [0.35, "#65A7C9"],
+        [0.70, "#2A7F9E"],
+        [1.00, "#0B3B6E"],
+    ],
+    title="Salary by ONET Occupation Type: Top 10 by Job Postings",
+    labels={
+        "Occupation_Name": "ONET Occupation",
+        "Median_Salary": "Median Salary",
+        "Job_Postings": "Job Postings",
+    },
+    hover_name="Occupation_Name",
+)
+
+bubble_minimum = onet_salary_pdf["Median_Salary"].min()
+bubble_maximum = onet_salary_pdf["Median_Salary"].max()
+bubble_padding = max(
+    (bubble_maximum - bubble_minimum) * 0.10,
+    bubble_minimum * 0.02,
+    1000,
+)
+
+onet_bubble.update_layout(
+    template="ad688",
+    height=720,
+    margin={"l": 90, "r": 80, "t": 100, "b": 220},
+    coloraxis_colorbar={"title": "Job Postings"},
+)
+onet_bubble.update_xaxes(tickangle=-40)
+onet_bubble.update_yaxes(
+    range=[bubble_minimum - bubble_padding, bubble_maximum + bubble_padding],
+    tickprefix="$",
+    tickformat=",.0f",
+)
+onet_bubble.update_traces(
+    marker={"line": {"color": "#FFFFFF", "width": 1.2}, "opacity": 0.82}
+)
+
+export_and_display_figure(
+    onet_bubble,
+    "salary_by_onet_bubble_chart",
+    width=1300,
+    height=800,
+)
+
+largest_onet = onet_salary_pdf.iloc[0]
+highest_salary_onet = onet_salary_pdf.loc[
+    onet_salary_pdf["Median_Salary"].idxmax()
+]
+
+display_two_sentence_insight(
+    (
+        f"{largest_onet['Occupation_Name']} is the most frequently represented "
+        f"ONET occupation with {int(largest_onet['Job_Postings']):,} postings."
+    ),
+    (
+        f"Within the ten largest occupation groups, "
+        f"{highest_salary_onet['Occupation_Name']} has the highest median salary "
+        f"at approximately ${highest_salary_onet['Median_Salary']:,.0f}, while "
+        "bubble size shows how salary comparisons vary in market coverage."
+    ),
+)
+```
+
+# 4. Salary by Education Level
+
+The assignment prompt says “two groups” but lists four education categories; therefore, the analysis creates all four requested groups. When a posting lists multiple degrees, it is assigned to the highest detected education level so that it appears in only one group.
+
+```{python}
+#| label: education-groups
+
+education_text = F.lower(
+    F.coalesce(F.col("EDUCATION_LEVELS_NAME"), F.lit(""))
+)
+
+education_analysis_df = (
+    clean_df
+    .withColumn(
+        "Education_Group",
+        F.when(
+            education_text.rlike(r"ph\.?d|doctor|professional degree"),
+            F.lit("PhD"),
+        )
+        .when(
+            education_text.rlike(r"master"),
+            F.lit("Master's"),
+        )
+        .when(
+            education_text.rlike(r"bachelor"),
+            F.lit("Bachelor's"),
+        )
+        .when(
+            education_text.rlike(
+                r"associate|ged|high school|secondary school|no education"
+            ),
+            F.lit("Associate's or lower"),
+        ),
+    )
+    .withColumn(
+        "ONET_NAME",
+        F.when(
+            F.col("ONET_NAME").isNull()
+            | (F.trim(F.col("ONET_NAME")) == ""),
+            F.lit("Unknown ONET occupation"),
+        ).otherwise(F.trim(F.col("ONET_NAME"))),
+    )
+    .filter(
+        F.col("Education_Group").isNotNull()
+        & F.col("MAX_YEARS_EXPERIENCE").isNotNull()
+        & (F.col("MAX_YEARS_EXPERIENCE") >= 0)
+        & F.col("Average_Salary").isNotNull()
+        & (F.col("Average_Salary") > 0)
+    )
+    .withColumn(
+        "Experience_Jittered",
+        F.col("MAX_YEARS_EXPERIENCE") + ((F.rand(42) - 0.5) * 0.30),
+    )
+)
+
+education_plot_pdf = (
+    education_analysis_df
+    .select(
+        "Education_Group",
+        "MAX_YEARS_EXPERIENCE",
+        "Experience_Jittered",
+        "Average_Salary",
+        "ONET_NAME",
+    )
+    .toPandas()
+)
+
+if education_plot_pdf.empty:
+    raise ValueError("No usable education-level records were available.")
+
+education_colors = {
+    "Associate's or lower": "#2A9D8F",
+    "Bachelor's": "#0B5FA5",
+    "Master's": "#E67E22",
+    "PhD": "#6C5CE7",
+}
+
+education_groups = [
+    "Associate's or lower",
+    "Bachelor's",
+    "Master's",
+    "PhD",
+]
+
+education_salary_min = education_plot_pdf["Average_Salary"].min()
+education_salary_max = education_plot_pdf["Average_Salary"].max()
+education_log_scale = (
+    education_salary_min > 0
+    and education_salary_max / education_salary_min > 100
+)
+
+education_experience_range = [
+    education_plot_pdf["Experience_Jittered"].min() - 0.5,
+    education_plot_pdf["Experience_Jittered"].max() + 0.5,
+]
+
+if education_log_scale:
+    education_salary_range = [
+        np.log10(education_salary_min) - 0.05,
+        np.log10(education_salary_max) + 0.05,
+    ]
+else:
+    education_salary_padding = max(
+        (education_salary_max - education_salary_min) * 0.05,
+        1000,
+    )
+    education_salary_range = [
+        max(0, education_salary_min - education_salary_padding),
+        education_salary_max + education_salary_padding,
+    ]
+
+
+def plot_education_group(group_name):
+    group_pdf = education_plot_pdf.loc[
+        education_plot_pdf["Education_Group"] == group_name
+    ].copy()
+
+    if group_pdf.empty:
+        display(Markdown(f"**Key insights.** No usable records were available for {group_name}."))
+        return
+
+    education_scatter = px.scatter(
+        group_pdf,
+        x="Experience_Jittered",
+        y="Average_Salary",
+        hover_name="ONET_NAME",
+        custom_data=["MAX_YEARS_EXPERIENCE"],
+        render_mode="webgl",
+        log_y=education_log_scale,
+        title=f"Experience versus Salary: {group_name}",
+        labels={
+            "Experience_Jittered": "Maximum Years of Experience (jittered)",
+            "Average_Salary": "Average Salary",
+        },
+    )
+
+    education_scatter.update_traces(
+        marker={
+            "color": education_colors[group_name],
+            "size": 8,
+            "opacity": 0.55,
+            "line": {"color": "#FFFFFF", "width": 0.5},
+        },
+        hovertemplate=(
+            "<b>%{hovertext}</b><br>"
+            "Maximum experience: %{customdata[0]:.1f} years<br>"
+            "Average salary: $%{y:,.0f}<extra></extra>"
+        ),
+    )
+
+    education_scatter.update_layout(
+        template="ad688",
+        height=650,
+        showlegend=False,
+        margin={"l": 90, "r": 40, "t": 90, "b": 90},
+    )
+    education_scatter.update_xaxes(range=education_experience_range)
+    education_scatter.update_yaxes(
+        range=education_salary_range,
+        title_text=(
+            "Average Salary (USD, logarithmic scale)"
+            if education_log_scale
+            else "Average Salary (USD)"
+        ),
+        tickprefix="$",
+        tickformat=",.0f",
+    )
+    education_scatter.add_annotation(
+        text="Horizontal jitter separates overlapping experience values",
+        xref="paper",
+        yref="paper",
+        x=1,
+        y=-0.18,
+        showarrow=False,
+        font={"size": 11, "color": "#5B6770"},
+    )
+
+    export_and_display_figure(
+        education_scatter,
+        f"education_{safe_file_name(group_name)}_scatter",
+        width=1200,
+        height=720,
+    )
+
+    median_salary_value = group_pdf["Average_Salary"].median()
+    median_experience_value = group_pdf["MAX_YEARS_EXPERIENCE"].median()
+    top_occupation = group_pdf["ONET_NAME"].value_counts().index[0]
+
+    display_two_sentence_insight(
+        (
+            f"The {group_name} group contains {len(group_pdf):,} postings, "
+            f"with a median average salary of ${median_salary_value:,.0f} and "
+            f"a median maximum experience requirement of "
+            f"{median_experience_value:.1f} years."
+        ),
+        (
+            f"{top_occupation} is the most frequently represented ONET "
+            "occupation in this education group, while the jitter makes "
+            "overlapping experience requirements visible."
+        ),
+    )
+
+
+for education_group in education_groups:
+    plot_education_group(education_group)
+```
+
+# 5. Salary by Remote Work Type
+
+Missing, blank, `[None]`, `Unknown`, and explicitly on-site values are classified as **Onsite**, following the assignment instructions. Hybrid is evaluated before Remote so that labels containing both words are classified correctly.
+
+```{python}
+#| label: remote-work-groups
+
+remote_text = F.lower(
+    F.trim(F.coalesce(F.col("REMOTE_TYPE_NAME"), F.lit("")))
+)
+
+remote_analysis_df = (
+    clean_df
+    .withColumn(
+        "Remote_Group",
+        F.when(remote_text.contains("hybrid"), F.lit("Hybrid"))
+        .when(remote_text.contains("remote"), F.lit("Remote"))
+        .otherwise(F.lit("Onsite")),
+    )
+    .withColumn(
+        "ONET_NAME",
+        F.when(
+            F.col("ONET_NAME").isNull()
+            | (F.trim(F.col("ONET_NAME")) == ""),
+            F.lit("Unknown ONET occupation"),
+        ).otherwise(F.trim(F.col("ONET_NAME"))),
+    )
+    .filter(
+        F.col("Average_Salary").isNotNull()
+        & (F.col("Average_Salary") > 0)
+        & F.col("MAX_YEARS_EXPERIENCE").isNotNull()
+        & (F.col("MAX_YEARS_EXPERIENCE") >= 0)
+    )
+    .withColumn(
+        "Experience_Jittered",
+        F.col("MAX_YEARS_EXPERIENCE") + ((F.rand(42) - 0.5) * 0.30),
+    )
+)
+
+remote_plot_pdf = (
+    remote_analysis_df
+    .select(
+        "Remote_Group",
+        "MAX_YEARS_EXPERIENCE",
+        "Experience_Jittered",
+        "Average_Salary",
+        "ONET_NAME",
+    )
+    .toPandas()
+)
+
+if remote_plot_pdf.empty:
+    raise ValueError("No usable remote-work records were available.")
+
+remote_colors = {
+    "Remote": "#0B5FA5",
+    "Hybrid": "#E67E22",
+    "Onsite": "#2A9D8F",
+}
+
+remote_groups = ["Remote", "Hybrid", "Onsite"]
+
+remote_salary_min = remote_plot_pdf["Average_Salary"].min()
+remote_salary_max = remote_plot_pdf["Average_Salary"].max()
+remote_log_scale = (
+    remote_salary_min > 0
+    and remote_salary_max / remote_salary_min > 100
+)
+
+remote_experience_range = [
+    remote_plot_pdf["Experience_Jittered"].min() - 0.5,
+    remote_plot_pdf["Experience_Jittered"].max() + 0.5,
+]
+
+if remote_log_scale:
+    remote_salary_range = [
+        np.log10(remote_salary_min) - 0.05,
+        np.log10(remote_salary_max) + 0.05,
+    ]
+else:
+    remote_salary_padding = max(
+        (remote_salary_max - remote_salary_min) * 0.05,
+        1000,
+    )
+    remote_salary_range = [
+        max(0, remote_salary_min - remote_salary_padding),
+        remote_salary_max + remote_salary_padding,
+    ]
+
+remote_medians = (
+    remote_plot_pdf
+    .groupby("Remote_Group")["Average_Salary"]
+    .median()
+    .sort_values(ascending=False)
+)
+remote_median_ranking = list(remote_medians.index)
+```
+
+## 5.1 Experience and Salary Scatter Plots
+
+```{python}
+#| label: remote-work-scatter-plots
+
+def plot_remote_scatter(group_name):
+    group_pdf = remote_plot_pdf.loc[
+        remote_plot_pdf["Remote_Group"] == group_name
+    ].copy()
+
+    if group_pdf.empty:
+        display(Markdown(f"**Key insights.** No usable records were available for {group_name}."))
+        return
+
+    remote_scatter = px.scatter(
+        group_pdf,
+        x="Experience_Jittered",
+        y="Average_Salary",
+        hover_name="ONET_NAME",
+        custom_data=["MAX_YEARS_EXPERIENCE"],
+        render_mode="webgl",
+        log_y=remote_log_scale,
+        title=f"Experience versus Salary: {group_name} Work",
+        labels={
+            "Experience_Jittered": "Maximum Years of Experience (jittered)",
+            "Average_Salary": "Average Salary",
+        },
+    )
+
+    remote_scatter.update_traces(
+        marker={
+            "color": remote_colors[group_name],
+            "size": 8,
+            "opacity": 0.55,
+            "line": {"color": "#FFFFFF", "width": 0.5},
+        },
+        hovertemplate=(
+            "<b>%{hovertext}</b><br>"
+            "Maximum experience: %{customdata[0]:.1f} years<br>"
+            "Average salary: $%{y:,.0f}<extra></extra>"
+        ),
+    )
+
+    remote_scatter.update_layout(
+        template="ad688",
+        height=650,
+        showlegend=False,
+        margin={"l": 90, "r": 40, "t": 90, "b": 90},
+    )
+    remote_scatter.update_xaxes(range=remote_experience_range)
+    remote_scatter.update_yaxes(
+        range=remote_salary_range,
+        title_text=(
+            "Average Salary (USD, logarithmic scale)"
+            if remote_log_scale
+            else "Average Salary (USD)"
+        ),
+        tickprefix="$",
+        tickformat=",.0f",
+    )
+    remote_scatter.add_annotation(
+        text="Horizontal jitter separates overlapping experience values",
+        xref="paper",
+        yref="paper",
+        x=1,
+        y=-0.18,
+        showarrow=False,
+        font={"size": 11, "color": "#5B6770"},
+    )
+
+    export_and_display_figure(
+        remote_scatter,
+        f"remote_{safe_file_name(group_name)}_scatter",
+        width=1200,
+        height=720,
+    )
+
+    median_salary_value = group_pdf["Average_Salary"].median()
+    median_experience_value = group_pdf["MAX_YEARS_EXPERIENCE"].median()
+    top_occupation = group_pdf["ONET_NAME"].value_counts().index[0]
+
+    display_two_sentence_insight(
+        (
+            f"The {group_name} group contains {len(group_pdf):,} postings, "
+            f"with a median average salary of ${median_salary_value:,.0f} and "
+            f"a median maximum experience requirement of "
+            f"{median_experience_value:.1f} years."
+        ),
+        (
+            f"{top_occupation} is the most common ONET occupation in this "
+            "work arrangement, and the jitter reveals postings with identical "
+            "experience requirements."
+        ),
+    )
+
+
+for remote_group in remote_groups:
+    plot_remote_scatter(remote_group)
+```
+
+## 5.2 Salary Histograms
+
+```{python}
+#| label: remote-work-histograms
+
+def plot_remote_histogram(group_name):
+    group_pdf = remote_plot_pdf.loc[
+        remote_plot_pdf["Remote_Group"] == group_name
+    ].copy()
+
+    if group_pdf.empty:
+        display(Markdown(f"**Key insights.** No salary records were available for {group_name}."))
+        return
+
+    remote_histogram = px.histogram(
+        group_pdf,
+        x="Average_Salary",
+        nbins=40,
+        log_x=remote_log_scale,
+        title=f"Salary Distribution: {group_name} Work",
+        labels={"Average_Salary": "Average Salary"},
+    )
+
+    remote_histogram.update_traces(
+        marker={
+            "color": remote_colors[group_name],
+            "line": {"color": "#FFFFFF", "width": 0.7},
+        },
+        opacity=0.85,
+        hovertemplate=(
+            "Salary: %{x:$,.0f}<br>Job postings: %{y:,}<extra></extra>"
+        ),
+    )
+
+    remote_histogram.update_layout(
+        template="ad688",
+        height=560,
+        showlegend=False,
+        bargap=0.04,
+        xaxis_title=(
+            "Average Salary (USD, logarithmic scale)"
+            if remote_log_scale
+            else "Average Salary (USD)"
+        ),
+        yaxis_title="Number of Job Postings",
+        margin={"l": 80, "r": 40, "t": 90, "b": 80},
+    )
+    remote_histogram.update_xaxes(
+        range=remote_salary_range,
+        tickprefix="$",
+        tickformat=",.0f",
+    )
+    remote_histogram.update_yaxes(rangemode="tozero")
+
+    export_and_display_figure(
+        remote_histogram,
+        f"remote_{safe_file_name(group_name)}_salary_histogram",
+        width=1200,
+        height=650,
+    )
+
+    median_salary_value = group_pdf["Average_Salary"].median()
+    first_quartile = group_pdf["Average_Salary"].quantile(0.25)
+    third_quartile = group_pdf["Average_Salary"].quantile(0.75)
+    median_rank = remote_median_ranking.index(group_name) + 1
+
+    display_two_sentence_insight(
+        (
+            f"The {group_name} salary distribution has a median of "
+            f"${median_salary_value:,.0f}, with the middle 50% ranging from "
+            f"${first_quartile:,.0f} to ${third_quartile:,.0f}."
+        ),
+        (
+            f"Its median ranks {median_rank} of {len(remote_median_ranking)} "
+            "work-arrangement groups, which provides a direct comparison with "
+            "the other salary distributions."
+        ),
+    )
+
+
+for remote_group in remote_groups:
+    plot_remote_histogram(remote_group)
+```
+
+# Conclusion
+
+The Spark workflow preserves distributed processing for the full MET dataset while using pandas only for focused Plotly inputs. Together, the industry, occupation, education, experience, and remote-work analyses show how both job characteristics and market composition shape the salary patterns visible to job seekers.
+
+```{python}
+#| label: stop-spark
+#| include: false
+
+spark.stop()
+```
