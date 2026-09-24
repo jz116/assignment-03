@@ -170,3 +170,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 lightcast_job_postings.csv
+MET_CareerCompass_2026/
+.pip-tmp/
+.venv/
+*.qmd.bak
+output/

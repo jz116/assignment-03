@@ -38,6 +38,8 @@ This assignment uses a private API key to create one Excel workbook for your res
 - Run the following code chunk to verify that your API key is working.
 - Do not run the code chunk below this one until you have updated your API key.
 
+> If Quarto reports `StdinNotImplementedError` in `prepare_workbook()`, the API key was not loaded from `.env`. Quarto cannot answer the helper's interactive fallback prompt, so save the real key in `~/assignment-03/.env` and rerun the render command; do not place the key directly in this document.
+
 ```text
 EMPLOYABILITY_API_KEY=replace_with_your_student_api_key
 EMPLOYABILITY_API_BASE_URL=https://met-employability-services.azurewebsites.net
@@ -72,8 +74,10 @@ print_runtime_summary()
 
 ## Create or Reuse Your Excel Workbook
 
+The course API currently returns HTTP 404 `Unknown research assignment` for the required `M03_A_emplo` code even after successful authentication. The cell is temporarily disabled so the analytical work can render; change it back to `eval: true` after the instructor confirms that the assignment has been registered on the server.
+
 ```{python}
-#| eval: true
+#| eval: false
 #| echo: false
 #| label: create-workbook
 workbook_path = prepare_workbook();
@@ -100,12 +104,25 @@ This validation step checks the Excel workbook locally and creates a local valid
 
 All large-scale filtering, cleaning, and aggregation is performed with Spark. Only the columns needed for a visualization, or already-aggregated results, are converted to pandas for Plotly.
 
+If the dataset is not already present on the EC2 instance, download the current course folder with the updated link below. The download folder can contain supporting items in addition to Parquet files; the loader in Section 1.1 discovers the Parquet data recursively.
+
+```{bash}
+#| label: download-current-dataset
+#| eval: false
+
+mkdir -p ../data/MET_CareerCompass_2026
+gdown --folder "https://drive.google.com/drive/folders/1Tq5Uixwz5J-aG_NfUQdI6X9CIrNz9ZFS?usp=sharing" \
+  -O ../data/MET_CareerCompass_2026
+```
+
 ## Shared Analysis Setup
 
 ```{python}
 #| label: analysis-setup
 
 from pathlib import Path
+import gc
+import os
 import re
 
 import numpy as np
@@ -116,11 +133,13 @@ import plotly.io as pio
 from IPython.display import Image, Markdown, display
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 
 np.random.seed(42)
 
 OUTPUT_DIR = Path("output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+STATIC_EXPORT = os.getenv("AD688_STATIC_EXPORT", "0").strip() == "1"
 
 pio.templates["ad688"] = go.layout.Template(
     layout=go.Layout(
@@ -174,7 +193,7 @@ pio.renderers.default = "notebook"
 
 
 def export_and_display_figure(fig, name, width=1200, height=700, scale=1):
-    """Export an interactive copy and display a static image for HTML/DOCX."""
+    """Save interactive HTML and display an interactive or static figure."""
     html_path = OUTPUT_DIR / f"{name}.html"
     png_path = OUTPUT_DIR / f"{name}.png"
 
@@ -183,6 +202,10 @@ def export_and_display_figure(fig, name, width=1200, height=700, scale=1):
         full_html=True,
         include_plotlyjs="cdn",
     )
+
+    if not STATIC_EXPORT:
+        display(fig)
+        return
 
     try:
         fig.write_image(
@@ -195,7 +218,46 @@ def export_and_display_figure(fig, name, width=1200, height=700, scale=1):
     except Exception as exc:
         print(f"Static export failed for {name}: {exc}")
         print("Displaying the interactive Plotly figure instead.")
-        fig.show()
+        display(fig)
+
+
+def stratified_plot_sample(
+    spark_df,
+    group_column,
+    selected_columns,
+    maximum_rows_per_group,
+    seed=42,
+):
+    """Collect a bounded stratified sample while leaving full data in Spark."""
+    group_count_rows = spark_df.groupBy(group_column).count().collect()
+    sampling_fractions = {}
+    target_rows = 0
+
+    for row in group_count_rows:
+        group_value = row[group_column]
+        group_count = int(row["count"])
+        if group_value is None or group_count <= 0:
+            continue
+
+        target_count = min(maximum_rows_per_group, group_count)
+        sampling_fractions[group_value] = target_count / group_count
+        target_rows += target_count
+
+    if not sampling_fractions:
+        return pd.DataFrame(columns=selected_columns)
+
+    sample_pdf = (
+        spark_df
+        .sampleBy(group_column, fractions=sampling_fractions, seed=seed)
+        .select(*selected_columns)
+        .toPandas()
+    )
+
+    print(
+        f"Plot sample collected: {len(sample_pdf):,} rows "
+        f"(target approximately {target_rows:,})."
+    )
+    return sample_pdf
 
 
 def display_two_sentence_insight(sentence_one, sentence_two):
@@ -211,7 +273,7 @@ def safe_file_name(value):
 
 ## 1.1 Load the Raw Dataset
 
-The code below locates all Parquet partitions, verifies that the expected 17 files are available, and loads them into a distributed Spark DataFrame.
+The updated course download contains 33 top-level items: 21 current job-data Parquet files named `jobs_2026_part_00001.parquet` through `jobs_2026_part_00021.parquet`, plus 12 coverage, change-log, manifest, verification, README, and provenance files. The code below locates every Parquet file, including files placed in nested directories, and reports the complete folder inventory before loading only the job-data partitions into a distributed Spark DataFrame.
 
 ```{python}
 #| label: load-dataset
@@ -230,35 +292,50 @@ data_candidates = [
 ]
 
 dataset_dir = None
+parquet_files = []
 for candidate in data_candidates:
-    if candidate.exists() and any(candidate.glob("*.parquet")):
-        dataset_dir = candidate
+    if not candidate.exists():
+        continue
+
+    candidate_parquet_files = sorted(
+        path for path in candidate.rglob("*.parquet") if path.is_file()
+    )
+    if candidate_parquet_files:
+        dataset_dir = candidate.resolve()
+        parquet_files = candidate_parquet_files
         break
 
 if dataset_dir is None:
     raise FileNotFoundError(
-        "MET_CareerCompass_2026 was not found. Expected it in ../data, "
-        "data/, or the repository root."
+        "No Parquet files were found in MET_CareerCompass_2026. Expected the "
+        "folder in ../data, data/, or the repository root."
     )
 
-parquet_files = sorted(dataset_dir.glob("*.parquet"))
-
-if len(parquet_files) != 17:
-    raise ValueError(
-        f"Expected 17 Parquet files, but found {len(parquet_files)} "
-        f"in {dataset_dir.resolve()}."
-    )
+top_level_items = list(dataset_dir.iterdir())
+all_files = [path for path in dataset_dir.rglob("*") if path.is_file()]
+support_file_count = len(all_files) - len(parquet_files)
 
 parquet_paths = [str(path.resolve()) for path in parquet_files]
 df = spark.read.parquet(*parquet_paths)
 df.createOrReplaceTempView("job_postings")
 
-print(f"Dataset directory: {dataset_dir.resolve()}")
-print(f"Parquet partitions loaded: {len(parquet_files)}")
+print(f"Dataset directory: {dataset_dir}")
+print(f"Top-level items found: {len(top_level_items)}")
+print(f"Files found recursively: {len(all_files)}")
+print(f"Parquet files loaded: {len(parquet_files)}")
+print(f"Non-Parquet support files ignored: {support_file_count}")
 print(f"Columns available: {len(df.columns)}")
+
+if len(parquet_files) == 21:
+    print("Current package check passed: all 21 Parquet files were found.")
+else:
+    print(
+        "Package notice: the current course download normally contains 21 "
+        f"Parquet files, but {len(parquet_files)} were found."
+    )
 ```
 
-The dataset loads from 17 Parquet partitions and exposes the full MET job-posting schema for distributed analysis. Keeping the raw data in Spark avoids collecting the full dataset into EC2 driver memory.
+The loader selects the 21 Parquet partitions and ignores the 12 supporting files, so manifests and provenance records cannot be mistaken for job postings. It reports a notice rather than terminating if a later course release changes the partition count, while Spark keeps the full raw dataset out of EC2 driver memory.
 
 ## 1.2 Cast Salary and Experience Columns
 
@@ -446,6 +523,14 @@ salary_industry_df = (
             F.lit("Unknown"),
         ).otherwise(F.trim(F.col("EMPLOYMENT_TYPE_NAME"))),
     )
+    .withColumn(
+        "_Plot_Group",
+        F.concat_ws(
+            " | ",
+            F.col("NAICS2_NAME"),
+            F.col("EMPLOYMENT_TYPE_NAME"),
+        ),
+    )
 )
 
 salary_distribution_summary = (
@@ -471,14 +556,15 @@ industry_order_rows = (
 
 industry_order = [row["NAICS2_NAME"] for row in industry_order_rows]
 
-salary_industry_pdf = (
-    salary_industry_df
-    .select(
+salary_industry_pdf = stratified_plot_sample(
+    salary_industry_df,
+    group_column="_Plot_Group",
+    selected_columns=[
         "NAICS2_NAME",
         "SALARY_FROM",
         "EMPLOYMENT_TYPE_NAME",
-    )
-    .toPandas()
+    ],
+    maximum_rows_per_group=600,
 )
 
 salary_minimum = salary_industry_pdf["SALARY_FROM"].min()
@@ -532,6 +618,18 @@ industry_box.update_traces(
     marker={"size": 5, "opacity": 0.60},
     line={"width": 1.3},
 )
+industry_box.add_annotation(
+    text=(
+        "Each industry/employment group is capped at approximately 600 "
+        "displayed observations; reported medians use the full Spark data."
+    ),
+    xref="paper",
+    yref="paper",
+    x=1,
+    y=-0.38,
+    showarrow=False,
+    font={"size": 11, "color": "#5B6770"},
+)
 
 export_and_display_figure(
     industry_box,
@@ -562,6 +660,10 @@ display_two_sentence_insight(
         "the cross-industry comparison readable."
     ),
 )
+
+del salary_industry_pdf
+del industry_box
+gc.collect()
 ```
 
 # 3. Salary Analysis by ONET Occupation Type
@@ -662,6 +764,10 @@ display_two_sentence_insight(
         "bubble size shows how salary comparisons vary in market coverage."
     ),
 )
+
+del onet_salary_pdf
+del onet_bubble
+gc.collect()
 ```
 
 # 4. Salary by Education Level
@@ -719,16 +825,55 @@ education_analysis_df = (
     )
 )
 
-education_plot_pdf = (
+education_summary_rows = (
     education_analysis_df
-    .select(
+    .groupBy("Education_Group")
+    .agg(
+        F.count("*").alias("Job_Postings"),
+        F.percentile_approx("Average_Salary", 0.50).alias("Median_Salary"),
+        F.percentile_approx("MAX_YEARS_EXPERIENCE", 0.50).alias(
+            "Median_Experience"
+        ),
+    )
+    .collect()
+)
+
+education_summary = {}
+for row in education_summary_rows:
+    education_summary[row["Education_Group"]] = row.asDict()
+
+education_occupation_window = Window.partitionBy("Education_Group").orderBy(
+    F.desc("Job_Postings"),
+    F.asc("ONET_NAME"),
+)
+
+education_top_occupation_rows = (
+    education_analysis_df
+    .groupBy("Education_Group", "ONET_NAME")
+    .agg(F.count("*").alias("Job_Postings"))
+    .withColumn(
+        "Occupation_Rank",
+        F.row_number().over(education_occupation_window),
+    )
+    .filter(F.col("Occupation_Rank") == 1)
+    .collect()
+)
+
+education_top_occupations = {}
+for row in education_top_occupation_rows:
+    education_top_occupations[row["Education_Group"]] = row["ONET_NAME"]
+
+education_plot_pdf = stratified_plot_sample(
+    education_analysis_df,
+    group_column="Education_Group",
+    selected_columns=[
         "Education_Group",
         "MAX_YEARS_EXPERIENCE",
         "Experience_Jittered",
         "Average_Salary",
         "ONET_NAME",
-    )
-    .toPandas()
+    ],
+    maximum_rows_per_group=4000,
 )
 
 if education_plot_pdf.empty:
@@ -832,7 +977,10 @@ def plot_education_group(group_name):
         tickformat=",.0f",
     )
     education_scatter.add_annotation(
-        text="Horizontal jitter separates overlapping experience values",
+        text=(
+            "Horizontal jitter separates overlapping experience values; "
+            "up to 4,000 observations are displayed per education group."
+        ),
         xref="paper",
         yref="paper",
         x=1,
@@ -848,13 +996,15 @@ def plot_education_group(group_name):
         height=720,
     )
 
-    median_salary_value = group_pdf["Average_Salary"].median()
-    median_experience_value = group_pdf["MAX_YEARS_EXPERIENCE"].median()
-    top_occupation = group_pdf["ONET_NAME"].value_counts().index[0]
+    group_summary = education_summary[group_name]
+    posting_count = int(group_summary["Job_Postings"])
+    median_salary_value = group_summary["Median_Salary"]
+    median_experience_value = group_summary["Median_Experience"]
+    top_occupation = education_top_occupations[group_name]
 
     display_two_sentence_insight(
         (
-            f"The {group_name} group contains {len(group_pdf):,} postings, "
+            f"The {group_name} group contains {posting_count:,} postings, "
             f"with a median average salary of ${median_salary_value:,.0f} and "
             f"a median maximum experience requirement of "
             f"{median_experience_value:.1f} years."
@@ -869,6 +1019,9 @@ def plot_education_group(group_name):
 
 for education_group in education_groups:
     plot_education_group(education_group)
+
+del education_plot_pdf
+gc.collect()
 ```
 
 # 5. Salary by Remote Work Type
@@ -910,16 +1063,61 @@ remote_analysis_df = (
     )
 )
 
-remote_plot_pdf = (
+remote_summary_rows = (
     remote_analysis_df
-    .select(
+    .groupBy("Remote_Group")
+    .agg(
+        F.count("*").alias("Job_Postings"),
+        F.percentile_approx("Average_Salary", 0.25).alias("Q1_Salary"),
+        F.percentile_approx("Average_Salary", 0.50).alias("Median_Salary"),
+        F.percentile_approx("Average_Salary", 0.75).alias("Q3_Salary"),
+        F.percentile_approx("MAX_YEARS_EXPERIENCE", 0.50).alias(
+            "Median_Experience"
+        ),
+    )
+    .orderBy(F.desc("Median_Salary"))
+    .collect()
+)
+
+remote_summary = {}
+remote_median_ranking = []
+for row in remote_summary_rows:
+    group_name = row["Remote_Group"]
+    remote_summary[group_name] = row.asDict()
+    remote_median_ranking.append(group_name)
+
+remote_occupation_window = Window.partitionBy("Remote_Group").orderBy(
+    F.desc("Job_Postings"),
+    F.asc("ONET_NAME"),
+)
+
+remote_top_occupation_rows = (
+    remote_analysis_df
+    .groupBy("Remote_Group", "ONET_NAME")
+    .agg(F.count("*").alias("Job_Postings"))
+    .withColumn(
+        "Occupation_Rank",
+        F.row_number().over(remote_occupation_window),
+    )
+    .filter(F.col("Occupation_Rank") == 1)
+    .collect()
+)
+
+remote_top_occupations = {}
+for row in remote_top_occupation_rows:
+    remote_top_occupations[row["Remote_Group"]] = row["ONET_NAME"]
+
+remote_plot_pdf = stratified_plot_sample(
+    remote_analysis_df,
+    group_column="Remote_Group",
+    selected_columns=[
         "Remote_Group",
         "MAX_YEARS_EXPERIENCE",
         "Experience_Jittered",
         "Average_Salary",
         "ONET_NAME",
-    )
-    .toPandas()
+    ],
+    maximum_rows_per_group=5000,
 )
 
 if remote_plot_pdf.empty:
@@ -960,13 +1158,6 @@ else:
         remote_salary_max + remote_salary_padding,
     ]
 
-remote_medians = (
-    remote_plot_pdf
-    .groupby("Remote_Group")["Average_Salary"]
-    .median()
-    .sort_values(ascending=False)
-)
-remote_median_ranking = list(remote_medians.index)
 ```
 
 ## 5.1 Experience and Salary Scatter Plots
@@ -1030,7 +1221,10 @@ def plot_remote_scatter(group_name):
         tickformat=",.0f",
     )
     remote_scatter.add_annotation(
-        text="Horizontal jitter separates overlapping experience values",
+        text=(
+            "Horizontal jitter separates overlapping experience values; "
+            "up to 5,000 observations are displayed per work arrangement."
+        ),
         xref="paper",
         yref="paper",
         x=1,
@@ -1046,13 +1240,15 @@ def plot_remote_scatter(group_name):
         height=720,
     )
 
-    median_salary_value = group_pdf["Average_Salary"].median()
-    median_experience_value = group_pdf["MAX_YEARS_EXPERIENCE"].median()
-    top_occupation = group_pdf["ONET_NAME"].value_counts().index[0]
+    group_summary = remote_summary[group_name]
+    posting_count = int(group_summary["Job_Postings"])
+    median_salary_value = group_summary["Median_Salary"]
+    median_experience_value = group_summary["Median_Experience"]
+    top_occupation = remote_top_occupations[group_name]
 
     display_two_sentence_insight(
         (
-            f"The {group_name} group contains {len(group_pdf):,} postings, "
+            f"The {group_name} group contains {posting_count:,} postings, "
             f"with a median average salary of ${median_salary_value:,.0f} and "
             f"a median maximum experience requirement of "
             f"{median_experience_value:.1f} years."
@@ -1122,6 +1318,18 @@ def plot_remote_histogram(group_name):
         tickformat=",.0f",
     )
     remote_histogram.update_yaxes(rangemode="tozero")
+    remote_histogram.add_annotation(
+        text=(
+            "Histogram displays up to 5,000 observations for this work "
+            "arrangement; quartiles and medians use the full Spark data."
+        ),
+        xref="paper",
+        yref="paper",
+        x=1,
+        y=-0.20,
+        showarrow=False,
+        font={"size": 11, "color": "#5B6770"},
+    )
 
     export_and_display_figure(
         remote_histogram,
@@ -1130,9 +1338,10 @@ def plot_remote_histogram(group_name):
         height=650,
     )
 
-    median_salary_value = group_pdf["Average_Salary"].median()
-    first_quartile = group_pdf["Average_Salary"].quantile(0.25)
-    third_quartile = group_pdf["Average_Salary"].quantile(0.75)
+    group_summary = remote_summary[group_name]
+    median_salary_value = group_summary["Median_Salary"]
+    first_quartile = group_summary["Q1_Salary"]
+    third_quartile = group_summary["Q3_Salary"]
     median_rank = remote_median_ranking.index(group_name) + 1
 
     display_two_sentence_insight(
@@ -1151,6 +1360,9 @@ def plot_remote_histogram(group_name):
 
 for remote_group in remote_groups:
     plot_remote_histogram(remote_group)
+
+del remote_plot_pdf
+gc.collect()
 ```
 
 # Conclusion
