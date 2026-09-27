@@ -1158,6 +1158,29 @@ else:
         remote_salary_max + remote_salary_padding,
     ]
 
+remote_histogram_bin_count = 30
+
+if np.isclose(remote_salary_min, remote_salary_max):
+    remote_histogram_padding = max(remote_salary_min * 0.05, 1.0)
+    remote_histogram_bin_edges = np.array(
+        [
+            max(remote_salary_min - remote_histogram_padding, 0.01),
+            remote_salary_max + remote_histogram_padding,
+        ]
+    )
+elif remote_log_scale:
+    remote_histogram_bin_edges = np.geomspace(
+        remote_salary_min,
+        remote_salary_max,
+        remote_histogram_bin_count + 1,
+    )
+else:
+    remote_histogram_bin_edges = np.linspace(
+        remote_salary_min,
+        remote_salary_max,
+        remote_histogram_bin_count + 1,
+    )
+
 ```
 
 ## 5.1 Experience and Salary Scatter Plots
@@ -1279,28 +1302,64 @@ def plot_remote_histogram(group_name):
         display(Markdown(f"**Key insights.** No salary records were available for {group_name}."))
         return
 
-    remote_histogram = px.histogram(
-        group_pdf,
-        x="Average_Salary",
-        nbins=40,
-        log_x=remote_log_scale,
-        title=f"Salary Distribution: {group_name} Work",
-        labels={"Average_Salary": "Average Salary"},
+    salary_values = pd.to_numeric(
+        group_pdf["Average_Salary"],
+        errors="coerce",
+    ).to_numpy(dtype=float)
+    salary_values = salary_values[
+        np.isfinite(salary_values) & (salary_values > 0)
+    ]
+
+    if salary_values.size == 0:
+        display(Markdown(f"**Key insights.** No valid salary values were available for {group_name}."))
+        return
+
+    histogram_counts, histogram_edges = np.histogram(
+        salary_values,
+        bins=remote_histogram_bin_edges,
+    )
+    nonempty_bins = histogram_counts > 0
+    histogram_left_edges = histogram_edges[:-1][nonempty_bins]
+    histogram_right_edges = histogram_edges[1:][nonempty_bins]
+    histogram_widths = (
+        histogram_right_edges - histogram_left_edges
     )
 
-    remote_histogram.update_traces(
-        marker={
-            "color": remote_colors[group_name],
-            "line": {"color": "#FFFFFF", "width": 0.7},
-        },
-        opacity=0.85,
-        hovertemplate=(
-            "Salary: %{x:$,.0f}<br>Job postings: %{y:,}<extra></extra>"
-        ),
+    if remote_log_scale:
+        histogram_centers = np.sqrt(
+            histogram_left_edges * histogram_right_edges
+        )
+    else:
+        histogram_centers = (
+            histogram_left_edges + histogram_right_edges
+        ) / 2.0
+
+    histogram_hover_data = np.column_stack(
+        [histogram_left_edges, histogram_right_edges]
+    )
+
+    remote_histogram = go.Figure(
+        go.Bar(
+            x=histogram_centers,
+            y=histogram_counts[nonempty_bins],
+            width=histogram_widths,
+            customdata=histogram_hover_data,
+            marker={
+                "color": remote_colors[group_name],
+                "line": {"color": "#FFFFFF", "width": 0.7},
+            },
+            opacity=0.85,
+            hovertemplate=(
+                "Salary range: $%{customdata[0]:,.0f} to "
+                "$%{customdata[1]:,.0f}<br>"
+                "Job postings: %{y:,}<extra></extra>"
+            ),
+        )
     )
 
     remote_histogram.update_layout(
         template="ad688",
+        title=f"Salary Distribution: {group_name} Work",
         height=560,
         showlegend=False,
         bargap=0.04,
@@ -1313,6 +1372,7 @@ def plot_remote_histogram(group_name):
         margin={"l": 80, "r": 40, "t": 90, "b": 80},
     )
     remote_histogram.update_xaxes(
+        type="log" if remote_log_scale else "linear",
         range=remote_salary_range,
         tickprefix="$",
         tickformat=",.0f",

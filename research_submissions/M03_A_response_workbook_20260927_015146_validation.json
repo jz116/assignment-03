@@ -2,7 +2,7 @@
   "assignment_code": "M03_A",
   "notebook_run_id": "M03_A_response_workbook_20260927_015146",
   "notebook_version": "research-survey-workbook-v1",
-  "saved_at": "2026-09-27T04:09:34.716669+00:00",
+  "saved_at": "2026-09-27T14:22:06.958806+00:00",
   "submit_to_api": false,
   "server_status_code": null,
   "server_response": null,
@@ -97,7 +97,7 @@
     "client_metadata": {
       "runtime": "research_survey_workbook.py",
       "python_version": "3.12.14",
-      "platform": "Linux-7.0.0-1012-aws-x86_64-with-glibc2.43",
+      "platform": "Linux-7.0.0-1013-aws-x86_64-with-glibc2.43",
       "runtime_context": {
         "captured_at": "2026-09-27T01:51:46.593050+00:00",
         "hostname": "ip-172-31-28-80",
@@ -109,7 +109,7 @@
         "memory_total_mb": 908.67,
         "memory_available_mb": 362.53
       },
-      "submitted_from_notebook_at": "2026-09-27T04:09:34.716650+00:00"
+      "submitted_from_notebook_at": "2026-09-27T14:22:06.958780+00:00"
     },
     "ai_chat_link": {
       "provider": "chatgpt",
