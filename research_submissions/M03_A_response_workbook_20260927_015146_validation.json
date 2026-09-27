@@ -1,0 +1,121 @@
+{
+  "assignment_code": "M03_A",
+  "notebook_run_id": "M03_A_response_workbook_20260927_015146",
+  "notebook_version": "research-survey-workbook-v1",
+  "saved_at": "2026-09-27T04:09:34.716669+00:00",
+  "submit_to_api": false,
+  "server_status_code": null,
+  "server_response": null,
+  "submitted_payload_without_api_key": {
+    "notebook_run_id": "M03_A_response_workbook_20260927_015146",
+    "notebook_version": "research-survey-workbook-v1",
+    "responses": [
+      {
+        "item_code": "classroom-v2:M03_A:generative_ai:04",
+        "value": "I would provide the relevant column names and data types for NAICS2_NAME, EMPLOYMENT_TYPE_NAME, and SALARY_FROM, along with the exact groupBy and aggregation expressions. I would use three synthetic rows, such as Information, Full-time, and 60000. This is sufficient to reproduce schema and grouping problems without exposing real employers, job descriptions, API keys, or student data."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:generative_ai:01",
+        "value": "I used ChatGPT to help organize the Spark cleaning steps and Plotly charts, especially the remote-work grouping and memory-safe sampling. I checked the printed medians, retained row count, group counts, chart labels, and the rendered HTML and DOCX. I compared the medians of 56,485 and 72,000 and the final 165,386 rows with the assignment's expected results before accepting the output."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:generative_ai:02",
+        "value": "I would create a small Spark DataFrame with values such as $56,485, 72,000, not listed, and null. After trimming, removing commas and dollar signs, and applying try_cast to double, I would expect 56485.0, 72000.0, null, and null. I would also test zero and negative values before applying the missing-salary rule."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:cybersecurity:03",
+        "value": "I would remove API keys, public IP addresses, instance IDs, repository tokens, usernames, employer-specific free text, and personal identifiers. I would keep the Spark version, relevant schema, sanitized stack-trace lines, transformation code, and several synthetic records. This preserves the conditions needed to reproduce the error without sharing credentials or sensitive data."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:cybersecurity:08",
+        "value": "I would revoke or rotate the exposed key immediately, update the local .env file, and confirm that .env is listed in .gitignore. I would remove the secret from Git history with an appropriate history-rewriting tool, update the remote history if authorized, and notify collaborators. Deleting one visible notebook cell is insufficient because the key may remain in earlier commits, cached outputs, or forks."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:cybersecurity:04",
+        "value": "I would read the complete command, identify every file and directory it changes, verify the package name and official source, and check for destructive options, privilege escalation, network downloads, or credential access. I would also check disk space, Python and Java compatibility, and confirm that the project virtual environment is active before running it."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:career:02",
+        "value": "Median imputation can make occupations with many missing salaries appear artificially similar and can narrow the observed salary spread. Before using the result for a career decision, I would compare each occupation's observed-only median and distribution with the imputed version, report the missing-salary rate, and avoid strong conclusions where salary coverage is limited."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:career:06",
+        "value": "The remote-work field includes missing, blank, and ambiguous labels that this analysis groups as Onsite, while salary availability can differ across Remote, Hybrid, and Onsite postings. This may overstate the onsite group and distort salary comparisons. I would report group sizes, missing-label rates, and salary coverage, and describe the comparison as exploratory rather than causal."
+      },
+      {
+        "item_code": "classroom-v2:M03_A:career:07",
+        "value": "I checked the available NAICS2_NAME and ONET_NAME values after loading the Parquet files, standardized blank labels, and reviewed grouped counts before plotting. I compared the code-derived categories with their readable names and inspected unusual or sparse groups. This matters because an incorrect mapping can combine unrelated occupations or industries and produce misleading salary comparisons."
+      }
+    ],
+    "assignment_artifact": {
+      "data_pull_summary": {
+        "raw_jobs_pulled": 165386,
+        "bronze_records_written": 0,
+        "silver_records_written": 165386,
+        "duplicate_jobs_removed": 0,
+        "malformed_rows_excluded": 0,
+        "aws_hours_used": 8,
+        "estimated_aws_spend_usd": 0.2
+      },
+      "domain_topic": {
+        "target_role": "Data Scientist",
+        "target_industry": "Software Publishers (NAICS 513210)",
+        "target_geography": "United States",
+        "skill_cluster": "Python, SQL, Machine Learning, Apache Spark, Data Visualization"
+      },
+      "selected_resources": [
+        "MET CareerCompass 2026",
+        "NAICS 2022",
+        "O*NET"
+      ],
+      "assignment_answers": {
+        "thought_process": "I loaded and cleaned the distributed Parquet data in Spark, verified the expected medians and row count, calculated full-data summaries, and used bounded samples for readable Plotly visualizations.",
+        "assignment_usefulness": "The assignment improved my ability to connect distributed data cleaning with clear career-market visualizations.",
+        "aws_cost_notes": "I estimated eight EC2 hours for Assignment 3. The $0.20 cost estimate is proportional to approximately $1.50 of total course AWS usage across about 64 hours."
+      },
+      "output_file_manifest": [
+        {
+          "path": "M03-A-jzhu116.qmd"
+        },
+        {
+          "path": "M03-A-jzhu116.html"
+        },
+        {
+          "path": "M03-A-jzhu116.docx"
+        },
+        {
+          "path": "output/*.html"
+        },
+        {
+          "path": "output/*.png"
+        },
+        {
+          "path": "../data/MET_CareerCompass_2026_cleaned"
+        }
+      ]
+    },
+    "client_metadata": {
+      "runtime": "research_survey_workbook.py",
+      "python_version": "3.12.14",
+      "platform": "Linux-7.0.0-1012-aws-x86_64-with-glibc2.43",
+      "runtime_context": {
+        "captured_at": "2026-09-27T01:51:46.593050+00:00",
+        "hostname": "ip-172-31-28-80",
+        "operating_system": "Linux 7.0.0-1012-aws",
+        "python_version": "3.12.14",
+        "machine": "x86_64",
+        "processor": "",
+        "aws": "{\"is_aws_ec2\": true, \"instance_id\": \"i-08e14ac9f15cea0c8\", \"instance_type\": \"t3.micro\", \"availability_zone\": \"us-east-1c\", \"public_hostname\": \"ec2-54-80-223-116.compute-1.amazonaws.com\", \"local_ipv4\": \"172.31.28.80\"}",
+        "memory_total_mb": 908.67,
+        "memory_available_mb": 362.53
+      },
+      "submitted_from_notebook_at": "2026-09-27T04:09:34.716650+00:00"
+    },
+    "ai_chat_link": {
+      "provider": "chatgpt",
+      "chat_url": "https://chatgpt.com/share/6ab88998-b950-83e9-ae1d-ba5022be0d49",
+      "student_confirmed_reviewed": true
+    }
+  },
+  "response_workbook_path": "research_submissions/M03_A_response_workbook_20260927_015146.xlsx"
+}

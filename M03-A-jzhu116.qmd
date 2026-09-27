@@ -44,7 +44,7 @@ This assignment uses a private API key to create one Excel workbook for your res
 EMPLOYABILITY_API_KEY=replace_with_your_student_api_key
 EMPLOYABILITY_API_BASE_URL=https://met-employability-services.azurewebsites.net
 EMPLOYABILITY_API_PATH_PREFIX=/met-career-match
-RESEARCH_ASSIGNMENT_CODE=M03_A_emplo
+RESEARCH_ASSIGNMENT_CODE=M03_A
 ```
 
 Do not commit `.env`, API keys, screenshots of keys, or generated response files unless your instructor explicitly asks for them.
@@ -74,23 +74,23 @@ print_runtime_summary()
 
 ## Create or Reuse Your Excel Workbook
 
-The course API currently returns HTTP 404 `Unknown research assignment` for the required `M03_A_emplo` code even after successful authentication. The cell is temporarily disabled so the analytical work can render; change it back to `eval: true` after the instructor confirms that the assignment has been registered on the server.
+The course announcement confirms that Individual Assignment 3 uses the research assignment code `M03_A`. The cell below creates a new workbook or reuses the existing workbook in `research_submissions/`.
 
 ```{python}
-#| eval: false
+#| eval: true
 #| echo: false
 #| label: create-workbook
-workbook_path = prepare_workbook();
+workbook_path = prepare_workbook()
 ```
 
 Open the generated workbook inside `research_submissions/` folder, complete the `Survey`, `Assignment`, and `AI Chat` sheets, then save the file.
 
 ## Validate Your Filled Workbook
 
-**Turn** `eval: true`after you are done with the assignment. 
+The completed workbook is validated during rendering. Finish and save the `Survey`, `Assignment`, and `AI Chat` sheets before running this cell.
 
 ```{python}
-#| eval: false
+#| eval: true
 #| echo: false
 #| label: validate-workbook
 validate_workbook()
@@ -100,7 +100,7 @@ This validation step checks the Excel workbook locally and creates a local valid
 
 # Assignment Responses
 
-**GitHub repository:** `REPLACE_WITH_YOUR_HTTPS_GITHUB_REPOSITORY_URL`
+**GitHub repository:** `https://github.com/jz116/assignment-03`
 
 All large-scale filtering, cleaning, and aggregation is performed with Spark. Only the columns needed for a visualization, or already-aggregated results, are converted to pandas for Plotly.
 
@@ -111,7 +111,7 @@ If the dataset is not already present on the EC2 instance, download the current 
 #| eval: false
 
 mkdir -p ../data/MET_CareerCompass_2026
-gdown --folder "https://drive.google.com/drive/folders/1Tq5Uixwz5J-aG_NfUQdI6X9CIrNz9ZFS?usp=sharing" \
+gdown --folder "https://drive.google.com/drive/folders/1wf3kZeUWO_0fnZJqcXZN-53l8MILX0a_?usp=sharing" \
   -O ../data/MET_CareerCompass_2026
 ```
 
